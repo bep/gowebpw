@@ -10,6 +10,7 @@ WASI_SDK_PATH ?= /opt/wasi-sdk
 
 BUILD_DIR := build
 TARGET_WASM := ${BUILD_DIR}/webp.wasm
+TARGET_WASM_GZ_DIR := ../webpwasm
 LIBWEBP_SRC := libwebp
 
 # Set the compiler and toolchain for WASI
@@ -57,6 +58,10 @@ all: $(LIBWEBP_SRC) $(BUILD_DIR)
 	make VERBOSE=1
 	@echo ">>> Building WebAssembly binary: $(TARGET_WASM)"
 	$(CC) $(WASM_CFLAGS) --sysroot=$(WASI_SDK_PATH)/share/wasi-sysroot $(C_INCLUDES) -o $(TARGET_WASM) $(C_SOURCES) $(LD_LIBS)
+	@echo ">>> Gzipping the WebAssembly binary: $(TARGET_WASM_GZ)"
+	gzip -kf -9 $(TARGET_WASM)
+	@echo ">>> Moving gzipped binary to: $(TARGET_WASM_GZ_DIR)"
+	mv $(TARGET_WASM).gz $(TARGET_WASM_GZ_DIR)
 
 
 

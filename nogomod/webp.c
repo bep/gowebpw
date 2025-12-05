@@ -1,3 +1,8 @@
+/*
+ * Copyright 2025 Bjørn Erik Pedersen
+ * SPDX-License-Identifier: MIT
+ */
+
 #include <stdlib.h>
 #include <string.h>
 #include <webp/encode.h>
