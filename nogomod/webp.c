@@ -5,7 +5,57 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <webp/encode.h>
+#include <webp/decode.h>
+#include "deps/parson/parson.h"
+
+void parse_jsonl_stream(FILE *stream);
+void drain(FILE *stream);
+
+typedef struct
+{
+    int version;
+    int id;
+    char command[256];
+    char err[256];
+} Header;
+
+typedef struct
+{
+    int width;
+    int height;
+    int stride;
+
+} InputOptions;
+
+typedef struct
+{
+    InputOptions options;
+
+} InputData;
+
+typedef struct
+{
+    Header header;
+    InputData data;
+
+} InputMessage;
+
+typedef struct
+{
+    Header header;
+    InputData data;
+
+} OutputMessage;
+
+#define MAX_LINE_LENGTH 4096
+
+int main()
+{
+    parse_jsonl_stream(stdin);
+    return 0;
+}
 
 static uint8_t *encodeNRGBA(WebPConfig *config, const uint8_t *rgba, int width, int height, int stride, size_t *output_size)
 {
@@ -83,4 +133,246 @@ static uint8_t *encodeGray(WebPConfig *config, uint8_t *y, int width, int height
     }
     *output_size = wrt.size;
     return wrt.mem;
+}
+
+InputMessage parse_input_message(const char *line)
+{
+    InputMessage msg = {0};
+
+    JSON_Value *root_value = json_parse_string(line);
+    if (root_value == NULL)
+    {
+        fprintf(stderr, "Error parsing JSON line\n");
+        return msg;
+    }
+
+    if (json_value_get_type(root_value) != JSONObject)
+    {
+        fprintf(stderr, "Error: Line did not parse to a valid JSON object\n");
+        json_value_free(root_value);
+        return msg;
+    }
+
+    JSON_Object *root_object = json_value_get_object(root_value);
+
+    JSON_Object *header_object = json_object_get_object(root_object, "header");
+    if (header_object != NULL)
+    {
+        msg.header.version = (int)json_object_get_number(header_object, "version");
+        msg.header.id = (int)json_object_get_number(header_object, "id");
+        const char *command_str = json_object_get_string(header_object, "command");
+        if (command_str != NULL)
+        {
+            strncpy(msg.header.command, command_str, sizeof(msg.header.command) - 1);
+            msg.header.command[sizeof(msg.header.command) - 1] = '\0';
+        }
+        const char *err_str = json_object_get_string(header_object, "err");
+        if (err_str != NULL)
+        {
+            strncpy(msg.header.err, err_str, sizeof(msg.header.err) - 1);
+            msg.header.err[sizeof(msg.header.err) - 1] = '\0';
+        }
+    }
+
+    JSON_Object *data_object = json_object_get_object(root_object, "data");
+    if (data_object != NULL)
+    {
+        JSON_Object *options_object = json_object_get_object(data_object, "options");
+        if (options_object != NULL)
+        {
+            msg.data.options.width = (int)json_object_get_number(data_object, "width");
+            msg.data.options.height = (int)json_object_get_number(data_object, "height");
+            msg.data.options.stride = (int)json_object_get_number(data_object, "stride");
+        }
+    }
+
+    json_value_free(root_value);
+    return msg;
+}
+
+static void write_blob(uint32_t id, const uint8_t *data, uint32_t size)
+{
+    fprintf(stderr, "=== write blob ===\n");
+    uint8_t output_blob_header[16];
+    const char magic[] = {'T', 'A', 'K', '3', '5', 'E', 'M', '1'};
+    memcpy(output_blob_header, magic, 8);
+    *(uint32_t *)&output_blob_header[8] = id;
+    *(uint32_t *)&output_blob_header[12] = size;
+
+    fwrite(output_blob_header, 1, sizeof(output_blob_header), stdout);
+    fwrite(data, 1, (size_t)size, stdout);
+    fflush(stdout);
+}
+
+void write_output_message(const OutputMessage *msg)
+{
+    fprintf(stderr, "=== write_output_message ===\n");
+    if (msg->data.options.width > 0)
+    {
+        fprintf(stdout, "{\"header\":{\"version\":%d,\"id\":%d,\"err\":\"%s\"},\"data\":{\"options\":{\"width\":%d,\"height\":%d,\"stride\":%d}}}\n",
+                msg->header.version,
+                msg->header.id,
+                msg->header.err,
+                msg->data.options.width,
+                msg->data.options.height,
+                msg->data.options.stride);
+    }
+    else
+    {
+        fprintf(stdout, "{\"header\":{\"version\":%d,\"id\":%d,\"err\":\"%s\"}}\n",
+                msg->header.version,
+                msg->header.id,
+                msg->header.err);
+    }
+    fflush(stdout);
+}
+
+void parse_jsonl_stream(FILE *stream)
+{
+
+    char line[MAX_LINE_LENGTH];
+
+    while (fgets(line, sizeof(line), stream) != NULL)
+    {
+        // {"header":{"version":1,"id":1,"err":""},"data":{"width"x123,"height":77,"stride":492}}
+        // Remove newline character if present
+        line[strcspn(line, "\n")] = 0;
+
+        if (strlen(line) > 0)
+        {
+            InputMessage input = parse_input_message(line);
+            fprintf(stderr, "InputMessage: version=%d, id=%d, command=%s, width=%d, height=%d, stride=%d\n",
+                    input.header.version,
+                    input.header.id,
+                    input.header.command,
+                    input.data.options.width,
+                    input.data.options.height,
+                    input.data.options.stride);
+
+            // Next in stream is a blob header defined in https://github.com/bep/textandbinaryreader
+            // T', 'A', 'K', '3', '5', 'E', 'M', '1' id uint32, size uint64
+            uint8_t blob_header[16];
+            size_t read_bytes = fread(blob_header, 1, sizeof(blob_header), stream);
+            if (read_bytes != sizeof(blob_header))
+            {
+                fprintf(stderr, "Error reading blob header\n");
+                continue;
+            }
+            uint32_t blob_id = *(uint32_t *)&blob_header[8];
+            uint64_t blob_size = *(uint64_t *)&blob_header[12];
+            uint8_t *blob_data = malloc((size_t)blob_size);
+            if (blob_data == NULL)
+            {
+                fprintf(stderr, "Error allocating memory for blob data\n");
+                continue;
+            }
+            read_bytes = fread(blob_data, 1, (size_t)blob_size, stream);
+            if (read_bytes != blob_size)
+            {
+                fprintf(stderr, "Error reading blob data\n");
+                free(blob_data);
+                continue;
+            }
+
+            OutputMessage output = {0};
+            output.header = input.header;
+
+            WebPConfig config;
+
+            if (strcmp(input.header.command, "decode") == 0)
+            {
+                int width, height;
+                if (!WebPGetInfo(blob_data, (size_t)blob_size, &width, &height))
+                {
+                    strncpy(output.header.err, "Failed to get WebP info", sizeof(output.header.err) - 1);
+                    write_output_message(&output);
+                    free(blob_data);
+                    continue;
+                }
+
+                uint8_t *output_buffer = WebPDecodeRGBA(blob_data, (size_t)blob_size, &width, &height);
+
+                if (output_buffer == NULL)
+                {
+                    strncpy(output.header.err, "Failed to decode WebP", sizeof(output.header.err) - 1);
+                    write_output_message(&output);
+                    free(blob_data);
+                    continue;
+                }
+
+                output.data.options.width = width;
+                output.data.options.height = height;
+                output.data.options.stride = width * 4;
+
+                write_output_message(&output);
+
+                size_t output_size = (size_t)width * height * 4;
+                write_blob((uint32_t)input.header.id, output_buffer, (uint32_t)output_size);
+
+                WebPFree(output_buffer);
+                free(blob_data);
+            }
+            else if (strcmp(input.header.command, "config") == 0)
+            {
+                strncpy(output.header.err, "Config command not implemented yet", sizeof(output.header.err) - 1);
+                write_output_message(&output);
+                free(blob_data);
+            }
+            else if (strcmp(input.header.command, "encodeNRGBA") == 0)
+            {
+
+                config.lossless = 0;
+                config.quality = 75.0f;
+
+                size_t output_size = 0;
+                uint8_t *webp_data = encodeNRGBA(&config, blob_data, input.data.options.width, input.data.options.height, input.data.options.stride, &output_size);
+                if (webp_data == NULL)
+                {
+                    strncpy(output.header.err, "Error encoding NRGBA to WebP", sizeof(output.header.err) - 1);
+                    write_output_message(&output);
+                    free(blob_data);
+                    continue;
+                }
+
+                write_output_message(&output);
+                // Write output to stdout with a blob header as defined in https://github.com/bep/textandbinaryreader
+                // T', 'A', 'K', '3', '5', 'E', 'M', '1' id uint32, size uint64
+                write_blob((uint32_t)input.header.id, webp_data, (uint32_t)output_size);
+                fprintf(stderr, "Encoded WebP size: %zu bytes\n", output_size);
+                free(webp_data);
+                free(blob_data);
+            }
+            else if (strcmp(input.header.command, "encodeGray") == 0)
+            {
+
+                config.lossless = 0;
+                config.quality = 75.0f;
+
+                size_t output_size = 0;
+                uint8_t *webp_data = encodeGray(&config, blob_data, input.data.options.width, input.data.options.height, input.data.options.stride, &output_size);
+                if (webp_data == NULL)
+                {
+                    strncpy(output.header.err, "Error encoding Gray to WebP", sizeof(output.header.err) - 1);
+                    write_output_message(&output);
+                    free(blob_data);
+                    continue;
+                }
+
+                write_output_message(&output);
+                // Write output to stdout with a blob header as defined in https://github.com/bep/textandbinaryreader
+                // T', 'A', 'K', '3', '5', 'E', 'M', '1' id uint32, size uint64
+                write_blob((uint32_t)input.header.id, webp_data, (uint32_t)output_size);
+
+                fprintf(stderr, "Encoded WebP size: %zu bytes\n", output_size);
+                free(webp_data);
+                free(blob_data);
+            }
+            else
+            {
+                snprintf(output.header.err, sizeof(output.header.err), "Unknown command: %s", input.header.command);
+                write_output_message(&output);
+                free(blob_data);
+            }
+        }
+    }
 }

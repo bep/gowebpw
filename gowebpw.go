@@ -1,34 +1,29 @@
 // Copyright 2025 Bjørn Erik Pedersen
 // SPDX-License-Identifier: MIT
 
-package golibtemplate
+package gowebpw
 
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"errors"
 	"image"
 	"io"
 	"math/bits"
-	"os"
-	"runtime"
 
+	"github.com/bep/textandbinaryreader"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
 type EncodeRequest struct {
-	ID  uint32
 	Src image.Image
 	Dst io.Writer
 }
 
-type EncodeResponse struct {
-	ID uint32 `json:"id"`
-}
+var foo textandbinaryreader.Reader
+
+type EncodeResponse struct{}
 
 // Response:
 // JSON
@@ -84,8 +79,8 @@ func (s *Server) Start() error {
 	} else {
 		cfg = cfg.WithMemoryLimitPages(4096) // 256MB
 	}
-	ctx := context.Background()
-	rt := wazero.NewRuntimeWithConfig(ctx, cfg)
+	// ctx := context.Background()
+	// rt := wazero.NewRuntimeWithConfig(ctx, cfg)
 
 	r, err := gzip.NewReader(bytes.NewReader(s.conf.Binary))
 	if err != nil {
@@ -99,7 +94,7 @@ func (s *Server) Start() error {
 		return err
 	}
 
-	cm, err := rt.CompileModule(experimental.WithCompilationWorkers(ctx, runtime.GOMAXPROCS(0)/4), data.Bytes())
+	/*cm, err := rt.CompileModule(experimental.WithCompilationWorkers(ctx, runtime.GOMAXPROCS(0)/4), data.Bytes())
 	if err != nil {
 		return err
 	}
@@ -108,7 +103,7 @@ func (s *Server) Start() error {
 
 	mc := wazero.NewModuleConfig().WithStderr(os.Stderr).WithStdout(io.Discard) // .WithStdin(io.Discard)
 
-	mc = mc.WithStartFunctions() // Delay _start until later.
+	mc = mc.WithStartFunctions() // Delay _start until later.*/
 
 	return nil
 }
