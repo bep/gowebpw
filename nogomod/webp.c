@@ -10,8 +10,25 @@
 #include <webp/decode.h>
 #include "deps/parson/parson.h"
 
+static const char *const kErrorMessages[VP8_ENC_ERROR_LAST] = {
+    "OK",
+    "OUT_OF_MEMORY: Out of memory allocating objects",
+    "BITSTREAM_OUT_OF_MEMORY: Out of memory re-allocating byte buffer",
+    "NULL_PARAMETER: NULL parameter passed to function",
+    "INVALID_CONFIGURATION: configuration is invalid",
+    "BAD_DIMENSION: Bad picture dimension. Maximum width and height "
+    "allowed is 16383 pixels.",
+    "PARTITION0_OVERFLOW: Partition #0 is too big to fit 512k.\n"
+    "To reduce the size of this partition, try using less segments "
+    "with the -segments option, and eventually reduce the number of "
+    "header bits using -partition_limit. More details are available "
+    "in the manual (`man cwebp`)",
+    "PARTITION_OVERFLOW: Partition is too big to fit 16M",
+    "BAD_WRITE: Picture writer returned an I/O error",
+    "FILE_TOO_BIG: File would be too big to fit in 4G",
+    "USER_ABORT: encoding abort requested by user"};
+
 void parse_jsonl_stream(FILE *stream);
-void drain(FILE *stream);
 
 typedef struct
 {
@@ -59,20 +76,35 @@ int main()
 
 static uint8_t *encodeNRGBA(WebPConfig *config, const uint8_t *rgba, int width, int height, int stride, size_t *output_size)
 {
+    fprintf(stderr, "encodeNRGBA w/h: %d/%d stride: %d\n", width, height, stride);
     WebPPicture pic;
     WebPMemoryWriter wrt;
     int ok;
     if (!WebPPictureInit(&pic))
     {
+        fprintf(stderr, "WebPPictureInit failed\n");
         return NULL;
     }
+
     pic.use_argb = 1;
     pic.width = width;
     pic.height = height;
     pic.writer = WebPMemoryWrite;
     pic.custom_ptr = &wrt;
     WebPMemoryWriterInit(&wrt);
-    ok = WebPPictureImportRGBA(&pic, rgba, stride) && WebPEncode(config, &pic);
+    ok = WebPPictureImportRGBA(&pic, rgba, stride);
+    if (ok)
+    {
+        ok = WebPEncode(config, &pic);
+        if (!ok)
+        {
+            fprintf(stderr, "WebPEncode failed: %d (%s)\n", pic.error_code, kErrorMessages[pic.error_code]);
+        }
+    }
+    else
+    {
+        fprintf(stderr, "WebPPictureImportRGBA failed: %d\n", pic.error_code);
+    }
     WebPPictureFree(&pic);
     if (!ok)
     {
@@ -180,9 +212,9 @@ InputMessage parse_input_message(const char *line)
         JSON_Object *options_object = json_object_get_object(data_object, "options");
         if (options_object != NULL)
         {
-            msg.data.options.width = (int)json_object_get_number(data_object, "width");
-            msg.data.options.height = (int)json_object_get_number(data_object, "height");
-            msg.data.options.stride = (int)json_object_get_number(data_object, "stride");
+            msg.data.options.width = (int)json_object_get_number(options_object, "width");
+            msg.data.options.height = (int)json_object_get_number(options_object, "height");
+            msg.data.options.stride = (int)json_object_get_number(options_object, "stride");
         }
     }
 
@@ -269,6 +301,7 @@ void parse_jsonl_stream(FILE *stream)
             read_bytes = fread(blob_data, 1, (size_t)blob_size, stream);
             if (read_bytes != blob_size)
             {
+                // TODO1 redo these error handling to use a goto Err.
                 fprintf(stderr, "Error reading blob data\n");
                 free(blob_data);
                 continue;
@@ -276,8 +309,6 @@ void parse_jsonl_stream(FILE *stream)
 
             OutputMessage output = {0};
             output.header = input.header;
-
-            WebPConfig config;
 
             if (strcmp(input.header.command, "decode") == 0)
             {
@@ -314,12 +345,30 @@ void parse_jsonl_stream(FILE *stream)
             }
             else if (strcmp(input.header.command, "config") == 0)
             {
-                strncpy(output.header.err, "Config command not implemented yet", sizeof(output.header.err) - 1);
+                int width, height;
+                if (!WebPGetInfo(blob_data, (size_t)blob_size, &width, &height)) {
+                    strncpy(output.header.err, "Failed to get WebP info", sizeof(output.header.err) - 1);
+                    write_output_message(&output);
+                    free(blob_data);
+                    continue;
+                }
+            
+                output.data.options.width = width;
+                output.data.options.height = height;
+
                 write_output_message(&output);
                 free(blob_data);
             }
             else if (strcmp(input.header.command, "encodeNRGBA") == 0)
             {
+                WebPConfig config;
+                if (!WebPConfigInit(&config))
+                {
+                    strncpy(output.header.err, "Error initializing WebPConfig", sizeof(output.header.err) - 1);
+                    write_output_message(&output);
+                    free(blob_data);
+                    continue;
+                }
 
                 config.lossless = 0;
                 config.quality = 75.0f;
@@ -344,6 +393,14 @@ void parse_jsonl_stream(FILE *stream)
             }
             else if (strcmp(input.header.command, "encodeGray") == 0)
             {
+                WebPConfig config;
+                if (!WebPConfigInit(&config))
+                {
+                    strncpy(output.header.err, "Error initializing WebPConfig", sizeof(output.header.err) - 1);
+                    write_output_message(&output);
+                    free(blob_data);
+                    continue;
+                }
 
                 config.lossless = 0;
                 config.quality = 75.0f;
